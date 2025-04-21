@@ -1,11 +1,43 @@
-// Основной файл App.vue без TailwindCSS, адаптований на простий CSS
+// App.vue з покращеним інтерфейсом: фільтри, додавання, оновлений вигляд
 <template>
   <div class="container">
     <header class="header">
       <h1>📊 Екологічний дашборд</h1>
-      <p>Інтерактивна система моніторингу стану довкілля</p>
+      <p>Фільтрація, додавання та перегляд екологічних спостережень</p>
     </header>
 
+    <!-- 🔍 Фільтри -->
+    <section class="filters">
+      <select v-model="filters.station">
+        <option value="">Усі станції</option>
+        <option v-for="s in stations" :key="s.id" :value="s.name">{{ s.name }}</option>
+      </select>
+      <select v-model="filters.indicator">
+        <option value="">Усі показники</option>
+        <option v-for="i in indicators" :key="i.id" :value="i.name">{{ i.name }}</option>
+      </select>
+      <input type="date" v-model="filters.date" />
+      <button @click="applyFilters">Застосувати</button>
+    </section>
+
+    <!-- ➕ Додавання нового спостереження -->
+    <section class="add-form">
+      <h2>➕ Додати нове спостереження</h2>
+      <form @submit.prevent="addObservation">
+        <select v-model="newEntry.station_id" required>
+          <option value="">Оберіть станцію</option>
+          <option v-for="s in stations" :key="s.id" :value="s.id">{{ s.name }}</option>
+        </select>
+        <select v-model="newEntry.indicator_id" required>
+          <option value="">Оберіть показник</option>
+          <option v-for="i in indicators" :key="i.id" :value="i.id">{{ i.name }}</option>
+        </select>
+        <input type="number" step="any" placeholder="Значення" v-model="newEntry.value" required />
+        <button type="submit">Додати</button>
+      </form>
+    </section>
+
+    <!-- 🔢 Метрики -->
     <section class="metrics">
       <div v-for="m in metrics" :key="m.label" class="card">
         <div class="label">{{ m.label }}</div>
@@ -13,11 +45,13 @@
       </div>
     </section>
 
+    <!-- 📈 Графік -->
     <section class="chart">
       <h2>📈 Графік температури</h2>
       <canvas ref="chartCanvas" height="100"></canvas>
     </section>
 
+    <!-- 📋 Таблиця -->
     <section class="table-section">
       <h2>📋 Останні спостереження</h2>
       <div class="table-container">
@@ -50,8 +84,11 @@ import { createClient } from '@supabase/supabase-js'
 import { Chart, registerables } from 'chart.js'
 Chart.register(...registerables)
 
-const supabase = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY)
+const supabase = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_KEY)
 
+const observations = ref([])
+const stations = ref([])
+const indicators = ref([])
 const metrics = ref([
   { label: 'Середня температура', value: '—' },
   { label: 'CO₂ сьогодні', value: '—' },
@@ -59,24 +96,34 @@ const metrics = ref([
   { label: 'Активні станції', value: '—' },
 ])
 
-const observations = ref([])
+const filters = ref({ station: '', indicator: '', date: '' })
+const newEntry = ref({ station_id: '', indicator_id: '', value: '' })
 const chartCanvas = ref(null)
+let chart
 
-onMounted(async () => {
-  const { data: obs } = await supabase.from('observations').select(`id, value, measured_at, indicator_id, indicators(name), observationstations(name)`).order('measured_at', { ascending: false }).limit(10)
+const loadObservations = async () => {
+  const { data: obs } = await supabase.from('observations').select(`id, value, measured_at, indicator_id, indicators(name), observationstations(name)`).order('measured_at', { ascending: false }).limit(100)
   observations.value = obs.map(o => ({
     id: o.id,
     value: o.value,
     date: new Date(o.measured_at).toLocaleString(),
     indicator: o.indicators.name,
-    station: o.observationstations.name
+    station: o.observationstations.name,
+    station_id: o.observationstations.id,
+    indicator_id: o.indicator_id,
+    raw: o
   }))
+  updateChart()
+  updateMetrics()
+}
 
-  const tempData = obs.filter(o => o.indicators.name === 'Температура').reverse()
-  const chart = new Chart(chartCanvas.value, {
+const updateChart = () => {
+  const tempData = observations.value.filter(o => o.indicator === 'Температура').reverse()
+  if (chart) chart.destroy()
+  chart = new Chart(chartCanvas.value, {
     type: 'line',
     data: {
-      labels: tempData.map(o => new Date(o.measured_at).toLocaleTimeString()),
+      labels: tempData.map(o => new Date(o.raw.measured_at).toLocaleTimeString()),
       datasets: [{
         label: 'Температура',
         data: tempData.map(o => o.value),
@@ -89,24 +136,47 @@ onMounted(async () => {
     options: {
       responsive: true,
       plugins: { legend: { display: true } },
-      scales: {
-        y: {
-          beginAtZero: true
-        }
-      }
+      scales: { y: { beginAtZero: true } }
     }
   })
+}
 
-  const { data: stations } = await supabase.from('observationstations').select()
-  metrics.value[3].value = stations?.length || 0
-
-  const tempValues = tempData.map(o => o.value)
+const updateMetrics = () => {
+  const tempValues = observations.value.filter(o => o.indicator === 'Температура').map(o => o.value)
   if (tempValues.length) metrics.value[0].value = (tempValues.reduce((a,b) => a+b,0) / tempValues.length).toFixed(1)
-
-  const co2 = obs.find(o => o.indicators.name === 'CO₂')
+  const co2 = observations.value.find(o => o.indicator === 'CO₂')
+  const noise = observations.value.find(o => o.indicator === 'Рівень шуму')
   if (co2) metrics.value[1].value = co2.value
-  const noise = obs.find(o => o.indicators.name === 'Рівень шуму')
   if (noise) metrics.value[2].value = noise.value
+  metrics.value[3].value = [...new Set(observations.value.map(o => o.station))].length
+}
+
+const applyFilters = () => {
+  loadObservations()
+  if (filters.value.station) observations.value = observations.value.filter(o => o.station === filters.value.station)
+  if (filters.value.indicator) observations.value = observations.value.filter(o => o.indicator === filters.value.indicator)
+  if (filters.value.date) observations.value = observations.value.filter(o => o.date.startsWith(new Date(filters.value.date).toLocaleDateString()))
+  updateChart()
+  updateMetrics()
+}
+
+const addObservation = async () => {
+  await supabase.from('observations').insert({
+    station_id: newEntry.value.station_id,
+    indicator_id: newEntry.value.indicator_id,
+    value: parseFloat(newEntry.value.value),
+    measured_at: new Date().toISOString()
+  })
+  newEntry.value = { station_id: '', indicator_id: '', value: '' }
+  await loadObservations()
+}
+
+onMounted(async () => {
+  const { data: s } = await supabase.from('observationstations').select()
+  const { data: i } = await supabase.from('indicators').select()
+  stations.value = s || []
+  indicators.value = i || []
+  await loadObservations()
 })
 </script>
 
@@ -123,12 +193,36 @@ body {
 }
 .header h1 {
   font-size: 2rem;
-  margin-bottom: 0.2rem;
   color: #0b3d91;
+  margin-bottom: 0.25rem;
 }
 .header p {
   color: #333;
-  margin-bottom: 2rem;
+  margin-bottom: 1.5rem;
+}
+.filters, .add-form form {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+  align-items: center;
+}
+select, input[type="number"], input[type="date"] {
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+  min-width: 150px;
+}
+button {
+  background-color: #007acc;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button:hover {
+  background-color: #005fa3;
 }
 .metrics {
   display: flex;
